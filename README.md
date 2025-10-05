@@ -32,5 +32,13 @@ After all the redactions one can convert .tpl and .txt back to sav file with
 
 This creates sav file with updated checksum. If put into savegame folder it should now introduce changes to the game.
 
+# Fix shortcut
+To fix the CAMPAIGNTIME by copying last two values or capping the numbers one can use `-f` fix option. 
+
+
+    python rwsave.py -f sav
+    
+Original file is first backed up and then overwritten.
+
 # License
 MIT
