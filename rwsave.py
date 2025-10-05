@@ -4,6 +4,7 @@ import re
 import sys
 import html
 import os
+import shutil
 
 try:
     from bs4 import BeautifulSoup
@@ -88,18 +89,12 @@ def decode_save(in_file: str, out_txt: str, out_template: str):
         f.write(formatted_payload)
     print(f"--> Successfully created readable save data at '{out_txt}'")
 
-    #template_content = content.replace(save_data_block_from_parser, '{SAVESTRING}')
-
-    # 1. Find the starting index of the save data using the unique checksum we found.
-    #    We search within the original, raw 'content' string.
     start_index = content.find(original_checksum)
     if start_index == -1:
         print("\n--- CRITICAL ERROR ---")
         print("Failed to locate the checksum in the raw file content. Cannot create template.")
         sys.exit(1)
 
-    # 2. Find the index of the first closing '</anyType>' tag that appears *after* the checksum.
-    #    This reliably marks the end of the data block we need to replace.
     end_marker = '&gt;</anyType></Values></ArrayOfKeyValueOfanyTypeanyType>'
     end_index = content.find(end_marker, start_index)+4
     if end_index == -1:
@@ -108,10 +103,8 @@ def decode_save(in_file: str, out_txt: str, out_template: str):
         sys.exit(1)
     print("s",start_index)
     print("e",end_index)
-    # 3. Rebuild the file content by slicing the original string and inserting the placeholder.
-    #    This is the most robust method possible.
+
     prefix = content[:start_index]
-    # The suffix starts at the beginning of the end_marker, preserving it.
     suffix = content[end_index:]
     template_content = prefix + '{SAVESTRING}' + suffix
 
@@ -149,6 +142,120 @@ def encode_save(in_txt: str, in_template: str, out_file: str):
         f.write(final_content)
     print(f"--> Successfully encoded new save file to '{out_file}'")
 
+def fix_save(in_file: str):
+    """
+    Surgically fixes oversized CAMPAIGNTIME values in a save file by only
+    modifying those specific lines, creates a backup, and overwrites the original file.
+    """
+    print(f"--> Starting fix process for '{in_file}'...")
+    max_time_ms = 500 * 60 * 60 * 1000  # 500 hours in milliseconds
+
+    # 1. Create backup and decode file to get the raw data payload
+    backup_file = in_file + '.bkp'
+    try:
+        shutil.copy2(in_file, backup_file)
+        print(f"--> Backup of original file created at '{backup_file}'")
+    except Exception as e:
+        print(f"Error: Could not create backup file. Aborting. {e}")
+        sys.exit(1)
+
+    try:
+        with open(in_file, 'r', encoding='utf-8-sig') as f:
+            content = f.read()
+    except FileNotFoundError:
+        print(f"Error: Input file not found at '{in_file}'")
+        sys.exit(1)
+
+    soup = BeautifulSoup(content, 'lxml-xml')
+    save_string_node = find_save_node(soup)
+    if not save_string_node:
+        print("Error: Could not find the core save data string within the file.")
+        sys.exit(1)
+
+    full_save_string = save_string_node.string.strip()
+    original_checksum = full_save_string[:32]
+    data_payload = full_save_string[32:]
+    clean_payload = html.unescape(data_payload)
+
+    # 2. Define a replacer function that re.sub will call for each match
+    lines_fixed_count = 0
+    def fix_campaign_time_match(match):
+        nonlocal lines_fixed_count
+        original_line = match.group(0)
+        
+        # Split the matched string into its component parts
+        # The first part is the "CAMPAIGNTIME" token, so we can ignore it
+        parts = original_line.strip('<mpdA>').split('<mpdB>')
+        
+        if len(parts) == 8: # ['CAMPAIGNTIME', 'Name', '0', 'val1', 'val2', '0', 'val3', 'val4']
+            try:
+                campaign_name = parts[1]
+                original_val1 = parts[3]
+                original_val2 = parts[4]
+                change_made = False
+
+                # First, perform the copy operation
+                parts[3] = parts[6]
+                parts[4] = parts[7]
+
+                # Second, cap all time values to the max allowed
+                for i in [3, 4, 6, 7]:
+                    val = int(parts[i])
+                    if val > max_time_ms:
+                        parts[i] = str(max_time_ms)
+                
+                new_val1 = parts[3]
+                new_val2 = parts[4]
+
+                if original_val1 != new_val1 or original_val2 != new_val2:
+                    print(f"    - Fixing '{campaign_name}': {original_val1}, {original_val2} -> {new_val1}, {new_val2}")
+                    change_made = True
+                
+                if change_made:
+                    lines_fixed_count += 1
+                
+                # Reconstruct the line from the (potentially) fixed parts and return it
+                return "<mpdB>".join(parts) + "<mpdA>"
+
+            except (ValueError, IndexError):
+                return original_line # On error, return the original string unchanged
+        else:
+            return original_line # If structure is wrong, return original string
+
+    # 3. Use re.sub to find all CAMPAIGNTIME entries and apply the fix to each one
+    # This ensures only these specific strings are ever modified.
+    campaign_time_pattern = re.compile(r"CAMPAIGNTIME(?:<mpdB>.*?){7}<mpdA>")
+    fixed_payload = re.sub(campaign_time_pattern, fix_campaign_time_match, clean_payload)
+
+    # 4. Report results and re-encode the file
+    if lines_fixed_count > 0:
+        print(f"--> Corrected values in {lines_fixed_count} CAMPAIGNTIME entries.")
+    else:
+        print("--> No CAMPAIGNTIME entries required fixing.")
+
+    start_index = content.find(original_checksum)
+    end_marker = '&gt;</anyType></Values></ArrayOfKeyValueOfanyTypeanyType>'
+    end_index = content.find(end_marker, start_index) + 4
+    if start_index == -1 or end_index == -1:
+        print("\n--- CRITICAL ERROR: Could not rebuild file structure. Restoring from backup. ---")
+        shutil.copy2(backup_file, in_file)
+        sys.exit(1)
+    
+    prefix = content[:start_index]
+    suffix = content[end_index:]
+    template_content = prefix + '{SAVESTRING}' + suffix
+
+    new_checksum = calculate_checksum(fixed_payload)
+    escaped_payload = html.escape(fixed_payload)
+    print(f"    New checksum calculated: {new_checksum}")
+    new_full_save_string = new_checksum + escaped_payload
+    final_content = template_content.replace('{SAVESTRING}', new_full_save_string)
+
+    with open(in_file, 'w', encoding='utf-8') as f:
+        f.write(final_content)
+    
+    print(f"--> Successfully fixed and encoded new data into '{in_file}'")
+    
 def main():
     parser = argparse.ArgumentParser(
         description="A robust tool to convert Rain World save files to a readable format and back.",
@@ -168,6 +275,11 @@ Workflow:
    - You must provide the edited text file and the generated template file.
    
    Example: python rwsave.py -e my_save.sav.txt my_save.sav.tpl new_save.sav
+
+4. Fix corrupted campaign time data in-place.
+   - Creates a backup (.bkp) and overwrites the original file with fixed data.
+   
+   Example: python rwsave.py -f my_save.sav
 """
     )
     command_group = parser.add_mutually_exclusive_group(required=True)
@@ -175,6 +287,8 @@ Workflow:
                                help="DECODE a .sav file into a .txt and .tpl file.")
     command_group.add_argument('-e', '--encode', dest='infiles', nargs=2, metavar=('IN_TXT', 'IN_TPL'),
                                help="ENCODE a .txt and .tpl file into a new .sav file.")
+    command_group.add_argument('-f', '--fix', dest='fixfile', metavar='INFILE',
+                               help="FIX campaign time data in a .sav file.")
 
     parser.add_argument('outfiles', nargs='*', help="[Optional] Output file paths. See usage for details.")
     
@@ -199,6 +313,12 @@ Workflow:
             base_name = os.path.normpath(in_txt).rsplit('.', 1)[0]
             outfile = f"{base_name}_new.sav"
         encode_save(in_txt, in_template, outfile)
+    
+    elif args.fixfile: # Fix Mode
+        if args.outfiles:
+            print("Warning: Output files are ignored when using the --fix option.")
+        fix_save(args.fixfile)
+
 
 if __name__ == "__main__":
     main()
