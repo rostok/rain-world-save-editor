@@ -13,8 +13,13 @@ except ImportError:
     print("Please install BeautifulSoup4 and lxml by running: pip install beautifulsoup4 lxml")
     sys.exit(1)
 
-def load_salt(filename="salt"):
+def load_salt(filename=None):
     """Loads the full salt string from an external file."""
+    if filename is None:
+        # Default to the script’s directory
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        filename = os.path.join(script_dir, "salt")
+
     try:
         with open(filename, 'r', encoding='utf-8') as f:
             full_salt = f.read().strip()
@@ -23,8 +28,8 @@ def load_salt(filename="salt"):
                 sys.exit(1)
             return full_salt
     except FileNotFoundError:
-        print(f"Error: The required salt file '{filename}' was not found in the same directory.")
-        print("Please create a file named 'salt' containing the full encryption string.")
+        print(f"Error: The required salt file '{filename}' was not found.")
+        print("Please create a file named 'salt' in the script directory containing the full encryption string.")
         sys.exit(1)
     except Exception as e:
         print(f"Error reading the salt file '{filename}': {e}")
@@ -322,3 +327,4 @@ Workflow:
 
 if __name__ == "__main__":
     main()
+
