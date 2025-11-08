@@ -16,7 +16,7 @@ except ImportError:
 def load_salt(filename=None):
     """Loads the full salt string from an external file."""
     if filename is None:
-        # Default to the script’s directory
+        # Default to the script's directory
         script_dir = os.path.dirname(os.path.abspath(__file__))
         filename = os.path.join(script_dir, "salt")
 
@@ -327,4 +327,5 @@ Workflow:
 
 if __name__ == "__main__":
     main()
+
 
